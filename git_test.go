@@ -72,3 +72,28 @@ func TestLogAndChanges(t *testing.T) {
 		t.Error("count or churn wrong")
 	}
 }
+
+func TestLater(t *testing.T) {
+	r := newRepo(t)
+	log, _ := r.Log(10)
+	if got := r.Later(log[1].SHA, "A.java"); !slices.Equal(got, []string{log[0].SHA}) {
+		t.Errorf("later than the first commit: %v", got)
+	}
+	if got := r.Later(log[0].SHA, "A.java"); len(got) != 0 {
+		t.Errorf("nothing is later than HEAD: %v", got)
+	}
+	if got := r.Later(log[1].SHA, "B.java"); len(got) != 0 {
+		t.Errorf("no commit changed B.java: %v", got)
+	}
+}
+
+func TestIsAncestor(t *testing.T) {
+	r := newRepo(t)
+	log, _ := r.Log(10)
+	if !r.IsAncestor(log[1].SHA, log[0].SHA) || r.IsAncestor(log[0].SHA, log[1].SHA) || r.IsAncestor(log[0].SHA, log[0].SHA) {
+		t.Error("ancestry is wrong")
+	}
+	if r.IsAncestor("baseline", log[0].SHA) {
+		t.Error("a name that is not a commit is no ancestor")
+	}
+}

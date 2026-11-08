@@ -350,6 +350,25 @@ func (r *Repo) CountRef(ref string) int {
 	return n
 }
 
+// IsAncestor says commit a comes before commit b in b's history (a commit is not its own ancestor here).
+func (r *Repo) IsAncestor(a, b string) bool {
+	if a == "" || b == "" || a == b {
+		return false
+	}
+	_, err := r.run("merge-base", "--is-ancestor", a, b)
+	return err == nil
+}
+
+// Later lists the commits after sha up to HEAD that changed path, oldest first: the ones that build on sha, so a
+// side branch merged later is left out. It is empty when sha is HEAD or not an ancestor of it.
+func (r *Repo) Later(sha, path string) []string {
+	out, err := r.run("rev-list", "--reverse", "--ancestry-path", sha+"..HEAD", "--", path)
+	if err != nil {
+		return nil
+	}
+	return strings.Fields(out)
+}
+
 // LogFile lists up to limit commits that changed one file, newest first.
 func (r *Repo) LogFile(path string, limit int) []Commit {
 	out, err := r.run("log", "-n", strconv.Itoa(limit), "--format=%H"+sep+"%an"+sep+"%at"+sep+"%P"+sep+"%s"+sep+"%b"+end, "HEAD", "--", path)
