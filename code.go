@@ -239,10 +239,12 @@ func (r *Repo) newBatch() (*batch, error) {
 // read returns the file named "rev:path", or false when there is none.
 func (b *batch) read(spec string) ([]byte, bool) {
 	if _, err := fmt.Fprintln(b.in, spec); err != nil {
+		logger().Warn("cat-file stopped", "spec", spec, "err", err)
 		return nil, false
 	}
 	header, err := b.out.ReadString('\n')
 	if err != nil {
+		logger().Warn("cat-file stopped", "spec", spec, "err", err)
 		return nil, false
 	}
 	f := strings.Fields(header)
@@ -255,6 +257,7 @@ func (b *batch) read(spec string) ([]byte, bool) {
 	}
 	buf := make([]byte, size+1) // the content and its trailing newline
 	if _, err := io.ReadFull(b.out, buf); err != nil {
+		logger().Warn("cat-file cut short", "spec", spec, "size", size, "err", err)
 		return nil, false
 	}
 	return buf[:size], true

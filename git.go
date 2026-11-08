@@ -42,6 +42,7 @@ type FileChange struct {
 func Open(dir string) (*Repo, error) {
 	out, err := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel").Output()
 	if err != nil {
+		logger().Debug("not a repository", "dir", dir, "err", err)
 		return nil, fmt.Errorf("%s is not inside a git repository", dir)
 	}
 	return &Repo{Root: filepath.Clean(strings.TrimSpace(string(out)))}, nil
@@ -57,9 +58,13 @@ func (r *Repo) run(args ...string) (string, error) {
 	cmd := exec.Command("git", append([]string{"-C", r.Root, "-c", "core.quotepath=off"}, args...)...)
 	var out, errOut bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errOut
+	start := time.Now()
 	if err := cmd.Run(); err != nil {
+		// Debug, not warn: many callers ask for things that may not exist, such as a file at an old commit.
+		logger().Debug("git failed", "args", strings.Join(args, " "), "stderr", strings.TrimSpace(errOut.String()), "took", time.Since(start))
 		return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), strings.TrimSpace(errOut.String()))
 	}
+	logger().Debug("git", "args", strings.Join(args, " "), "bytes", out.Len(), "took", time.Since(start))
 	return out.String(), nil
 }
 
