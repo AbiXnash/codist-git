@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AbiXnash/codist-git/testrepo"
+	"github.com/abxengg/codist-git/testrepo"
 )
 
 func TestIsCode(t *testing.T) {

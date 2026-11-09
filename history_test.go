@@ -3,7 +3,7 @@ package git
 import (
 	"testing"
 
-	"github.com/AbiXnash/codist-git/testrepo"
+	"github.com/abxengg/codist-git/testrepo"
 )
 
 func TestHistory(t *testing.T) {

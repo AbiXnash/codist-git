@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AbiXnash/codist-git/testrepo"
+	"github.com/abxengg/codist-git/testrepo"
 )
 
 func open(t *testing.T) (*Repo, *testrepo.Repo) {
