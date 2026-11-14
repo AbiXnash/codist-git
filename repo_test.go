@@ -2,6 +2,7 @@ package git
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -165,5 +166,64 @@ func TestMissing(t *testing.T) {
 	}
 	if r.Resolve("nope") != "" || r.Resolve(testrepo.Branch) != tr.Ext || r.Resolve(tr.Bug[:8]) != tr.Bug {
 		t.Error("resolve")
+	}
+}
+
+// A revision that starts with a dash would be read by git as an option (--output=FILE writes a file), so every
+// function that takes one refuses it.
+func TestRevisionsThatLookLikeOptionsAreRefused(t *testing.T) {
+	r := newRepo(t)
+	target := filepath.Join(t.TempDir(), "written.txt")
+	bad := "--output=" + target
+	if _, err := r.Get(bad); err == nil {
+		t.Error("Get took an option")
+	}
+	if _, err := r.LogRef(bad, 5); err == nil {
+		t.Error("LogRef took an option")
+	}
+	if _, err := r.Changes(bad); err == nil {
+		t.Error("Changes took an option")
+	}
+	if _, err := r.Files(bad); err == nil {
+		t.Error("Files took an option")
+	}
+	if _, ok := r.FileAt(bad, "A.java"); ok {
+		t.Error("FileAt took an option")
+	}
+	if r.Resolve(bad) != "" || r.CountRef(bad) != 0 || len(r.Authors(bad)) != 0 || r.IsAncestor(bad, "HEAD") || r.Later(bad, "A.java") != nil ||
+		r.BlameAt(bad, "A.java", 1, 1) != nil || len(r.ReadAll(bad, []string{"A.java"})) != 0 || len(r.ReadAll("HEAD\nHEAD", []string{"A.java"})) != 0 {
+		t.Error("a function took an option as a revision")
+	}
+	if _, err := os.Stat(target); err == nil {
+		t.Error("git wrote a file named by a revision")
+	}
+}
+
+// File names with spaces stay whole, and a changed line that looks like a diff header stays a changed line.
+func TestSpacedNamesAndHeaderLikeLines(t *testing.T) {
+	r := newRepo(t)
+	run := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", r.Root, "-c", "user.name=T", "-c", "user.email=t@t"}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %s", args, out)
+		}
+	}
+	os.MkdirAll(filepath.Join(r.Root, "my docs"), 0o755)
+	os.WriteFile(filepath.Join(r.Root, "my docs", "read me.txt"), []byte("one\n-- old note\nthree\nfour\n"), 0o644)
+	run("add", ".")
+	run("commit", "-q", "-m", "Add notes")
+	files, err := r.Files(r.Head())
+	if err != nil || !slices.Contains(files, "my docs/read me.txt") || len(files) != 2 {
+		t.Fatalf("files: %q %v", files, err)
+	}
+	os.WriteFile(filepath.Join(r.Root, "my docs", "read me.txt"), []byte("one\n++ new note\nthree\nfour\nfive\n"), 0o644)
+	run("commit", "-q", "-am", "Change notes")
+	ch, err := r.Changes(r.Head())
+	if err != nil || len(ch) != 1 {
+		t.Fatalf("changes: %+v %v", ch, err)
+	}
+	if ch[0].Path != "my docs/read me.txt" || !slices.Equal(ch[0].Added, []int{2, 5}) ||
+		!strings.Contains(ch[0].Patch, "--- old note") || !strings.Contains(ch[0].Patch, "+++ new note") {
+		t.Errorf("change: %+v", ch[0])
 	}
 }

@@ -88,11 +88,29 @@ func (r *Repo) Branch() string {
 
 const sep, end = "\x1f", "\x1e"
 
+// unsafe says a revision (a commit id, a branch name) must not be handed to git: one that starts with a dash would
+// be read as an option, and one with a line break would be read as a second request by cat-file. Revisions can come
+// from outside, such as a web request, so every function that takes one checks it first.
+func unsafe(revs ...string) bool {
+	for _, r := range revs {
+		if strings.HasPrefix(r, "-") || strings.ContainsAny(r, "\n\x00") {
+			logger().Warn("revision refused", "rev", r)
+			return true
+		}
+	}
+	return false
+}
+
+var errUnsafe = fmt.Errorf("not a revision")
+
 // Log lists up to limit commits reachable from HEAD, newest first.
 func (r *Repo) Log(limit int) ([]Commit, error) { return r.LogRef("HEAD", limit) }
 
 // LogRef lists up to limit commits reachable from ref, newest first.
 func (r *Repo) LogRef(ref string, limit int) ([]Commit, error) {
+	if unsafe(ref) {
+		return nil, errUnsafe
+	}
 	out, err := r.run("log", "-n", strconv.Itoa(limit), "--format=%H"+sep+"%an"+sep+"%at"+sep+"%P"+sep+"%s"+sep+"%b"+end, ref, "--")
 	if err != nil {
 		return nil, err
@@ -112,6 +130,9 @@ func (r *Repo) LogRef(ref string, limit int) ([]Commit, error) {
 
 // Get reads one commit.
 func (r *Repo) Get(sha string) (Commit, error) {
+	if unsafe(sha) {
+		return Commit{}, errUnsafe
+	}
 	out, err := r.run("log", "-n", "1", "--format=%H"+sep+"%an"+sep+"%at"+sep+"%P"+sep+"%s"+sep+"%b"+end, sha, "--")
 	if err != nil {
 		return Commit{}, err
@@ -129,6 +150,9 @@ var hunkRe = regexp.MustCompile(`^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
 
 // Changes lists what a commit changed against its first parent, or against nothing for the first commit.
 func (r *Repo) Changes(sha string) ([]FileChange, error) {
+	if unsafe(sha) {
+		return nil, errUnsafe
+	}
 	args := []string{"show", "--format=", "--no-color", "-M", "-U3", "--no-ext-diff", sha}
 	out, err := r.run(args...)
 	if err != nil {
@@ -145,14 +169,34 @@ func (r *Repo) Changes(sha string) ([]FileChange, error) {
 		}
 		body.Reset()
 	}
+	inHunk := false // --- and +++ are headers only before a file's first hunk; after it they are changed lines
 	for _, line := range strings.Split(out, "\n") {
 		switch {
 		case strings.HasPrefix(line, "diff --git "):
 			flush()
 			cur = &FileChange{Status: "modified"}
+			inHunk = false
 			continue
 		case cur == nil:
 			continue
+		case strings.HasPrefix(line, "@@"):
+			inHunk = true
+			if m := hunkRe.FindStringSubmatch(line); m != nil {
+				newLine, _ = strconv.Atoi(m[1])
+			}
+			body.WriteString(line + "\n")
+		case inHunk && strings.HasPrefix(line, "+"):
+			cur.Added = append(cur.Added, newLine)
+			newLine++
+			body.WriteString(line + "\n")
+		case inHunk && strings.HasPrefix(line, "-"):
+			body.WriteString(line + "\n")
+		case inHunk && strings.HasPrefix(line, " "):
+			newLine++
+			body.WriteString(line + "\n")
+		case inHunk && strings.HasPrefix(line, `\`):
+			body.WriteString(line + "\n")
+		case inHunk:
 		case strings.HasPrefix(line, "new file mode"):
 			cur.Status = "added"
 		case strings.HasPrefix(line, "deleted file mode"):
@@ -162,31 +206,16 @@ func (r *Repo) Changes(sha string) ([]FileChange, error) {
 		case strings.HasPrefix(line, "rename to "):
 			cur.Path = strings.TrimPrefix(line, "rename to ")
 		case strings.HasPrefix(line, "--- "):
-			if p := strings.TrimPrefix(line, "--- "); p != "/dev/null" && cur.OldPath == "" {
+			// git ends a name that has spaces with a tab
+			if p := strings.TrimRight(strings.TrimPrefix(line, "--- "), "\t"); p != "/dev/null" && cur.OldPath == "" {
 				cur.OldPath = strings.TrimPrefix(p, "a/")
 			}
 		case strings.HasPrefix(line, "+++ "):
-			if p := strings.TrimPrefix(line, "+++ "); p != "/dev/null" {
+			if p := strings.TrimRight(strings.TrimPrefix(line, "+++ "), "\t"); p != "/dev/null" {
 				cur.Path = strings.TrimPrefix(p, "b/")
 			} else {
 				cur.Path = cur.OldPath
 			}
-		case strings.HasPrefix(line, "@@"):
-			if m := hunkRe.FindStringSubmatch(line); m != nil {
-				newLine, _ = strconv.Atoi(m[1])
-			}
-			body.WriteString(line + "\n")
-		case strings.HasPrefix(line, "+"):
-			cur.Added = append(cur.Added, newLine)
-			newLine++
-			body.WriteString(line + "\n")
-		case strings.HasPrefix(line, "-"):
-			body.WriteString(line + "\n")
-		case strings.HasPrefix(line, " "):
-			newLine++
-			body.WriteString(line + "\n")
-		case strings.HasPrefix(line, `\`):
-			body.WriteString(line + "\n")
 		}
 	}
 	flush()
@@ -195,6 +224,9 @@ func (r *Repo) Changes(sha string) ([]FileChange, error) {
 
 // FileAt reads a file as it was at a commit.
 func (r *Repo) FileAt(sha, path string) ([]byte, bool) {
+	if unsafe(sha) {
+		return nil, false
+	}
 	out, err := r.run("show", sha+":"+path)
 	if err != nil {
 		return nil, false
@@ -204,11 +236,20 @@ func (r *Repo) FileAt(sha, path string) ([]byte, bool) {
 
 // Files lists every tracked file at a commit.
 func (r *Repo) Files(sha string) ([]string, error) {
-	out, err := r.run("ls-tree", "-r", "--name-only", sha)
+	if unsafe(sha) {
+		return nil, errUnsafe
+	}
+	out, err := r.run("ls-tree", "-r", "-z", "--name-only", sha) // -z: names end with NUL, so spaces stay in them
 	if err != nil {
 		return nil, err
 	}
-	return strings.Fields(out), nil
+	var files []string
+	for _, p := range strings.Split(out, "\x00") {
+		if p != "" {
+			files = append(files, p)
+		}
+	}
+	return files, nil
 }
 
 // Churn counts, for each file, how many of the last limit commits changed it.
@@ -248,6 +289,9 @@ func (r *Repo) Count() int {
 
 // Resolve turns a branch name or commit into a full commit id, or "" if there is none.
 func (r *Repo) Resolve(ref string) string {
+	if unsafe(ref) {
+		return ""
+	}
 	out, err := r.run("rev-parse", "--verify", "--quiet", ref+"^{commit}")
 	if err != nil {
 		return ""
@@ -259,7 +303,7 @@ func (r *Repo) Resolve(ref string) string {
 // one process per file. Files that do not exist are left out.
 func (r *Repo) ReadAll(ref string, paths []string) map[string][]byte {
 	out := map[string][]byte{}
-	if len(paths) == 0 {
+	if len(paths) == 0 || unsafe(ref) {
 		return out
 	}
 	cmd := exec.Command("git", "-C", r.Root, "cat-file", "--batch")
@@ -326,8 +370,11 @@ func (r *Repo) Refs() []Ref {
 
 // Authors counts commits per author on ref.
 func (r *Repo) Authors(ref string) map[string]int {
-	out, err := r.run("shortlog", "-sn", "--no-merges", ref, "--")
 	counts := map[string]int{}
+	if unsafe(ref) {
+		return counts
+	}
+	out, err := r.run("shortlog", "-sn", "--no-merges", ref, "--")
 	if err != nil {
 		return counts
 	}
@@ -342,6 +389,9 @@ func (r *Repo) Authors(ref string) map[string]int {
 
 // CountRef is how many commits ref has.
 func (r *Repo) CountRef(ref string) int {
+	if unsafe(ref) {
+		return 0
+	}
 	out, err := r.run("rev-list", "--count", ref, "--")
 	if err != nil {
 		return 0
@@ -352,7 +402,7 @@ func (r *Repo) CountRef(ref string) int {
 
 // IsAncestor says commit a comes before commit b in b's history (a commit is not its own ancestor here).
 func (r *Repo) IsAncestor(a, b string) bool {
-	if a == "" || b == "" || a == b {
+	if a == "" || b == "" || a == b || unsafe(a, b) {
 		return false
 	}
 	_, err := r.run("merge-base", "--is-ancestor", a, b)
@@ -362,6 +412,9 @@ func (r *Repo) IsAncestor(a, b string) bool {
 // Later lists the commits after sha up to HEAD that changed path, oldest first: the ones that build on sha, so a
 // side branch merged later is left out. It is empty when sha is HEAD or not an ancestor of it.
 func (r *Repo) Later(sha, path string) []string {
+	if unsafe(sha) {
+		return nil
+	}
 	out, err := r.run("rev-list", "--reverse", "--ancestry-path", sha+"..HEAD", "--", path)
 	if err != nil {
 		return nil

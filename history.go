@@ -57,6 +57,9 @@ func (r *Repo) History(limit int) ([]CommitStat, error) {
 
 // BlameAt names, for lines from..to of a file at ref, the commit that last changed each line.
 func (r *Repo) BlameAt(ref, path string, from, to int) []string {
+	if unsafe(ref) {
+		return nil
+	}
 	out, err := r.run("blame", "--porcelain", "-L", fmt.Sprintf("%d,%d", from, to), ref, "--", path)
 	if err != nil {
 		return nil
