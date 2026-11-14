@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -221,7 +222,14 @@ type batch struct {
 }
 
 func (r *Repo) newBatch() (*batch, error) {
-	cmd := exec.Command("git", "-C", r.Root, "cat-file", "--batch")
+	// Run from outside the repository, so a process kept open does not hold the folder (Windows cannot remove a
+	// folder a process is running in).
+	gitDir, err := r.run("rev-parse", "--absolute-git-dir")
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command("git", "--git-dir", strings.TrimSpace(gitDir), "cat-file", "--batch")
+	cmd.Dir = os.TempDir()
 	in, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -238,29 +246,36 @@ func (r *Repo) newBatch() (*batch, error) {
 
 // read returns the file named "rev:path", or false when there is none.
 func (b *batch) read(spec string) ([]byte, bool) {
-	if _, err := fmt.Fprintln(b.in, spec); err != nil {
+	src, ok, err := b.get(spec)
+	if err != nil {
 		logger().Warn("cat-file stopped", "spec", spec, "err", err)
-		return nil, false
+	}
+	return src, ok && err == nil
+}
+
+// get is read that also says when the process itself failed, so the caller can start a new one. Whatever the
+// name is (a file, a folder, a commit), its whole answer is read, so the next request starts clean.
+func (b *batch) get(spec string) ([]byte, bool, error) {
+	if _, err := fmt.Fprintln(b.in, spec); err != nil {
+		return nil, false, err
 	}
 	header, err := b.out.ReadString('\n')
 	if err != nil {
-		logger().Warn("cat-file stopped", "spec", spec, "err", err)
-		return nil, false
+		return nil, false, err
 	}
 	f := strings.Fields(header)
-	if len(f) < 3 || f[1] != "blob" {
-		return nil, false // "<spec> missing"
+	if len(f) != 3 || strings.HasSuffix(header, " missing\n") || strings.HasSuffix(header, " ambiguous\n") {
+		return nil, false, nil // "<spec> missing"
 	}
 	size, err := strconv.Atoi(f[2])
 	if err != nil {
-		return nil, false
+		return nil, false, fmt.Errorf("cat-file header %q", header)
 	}
 	buf := make([]byte, size+1) // the content and its trailing newline
 	if _, err := io.ReadFull(b.out, buf); err != nil {
-		logger().Warn("cat-file cut short", "spec", spec, "size", size, "err", err)
-		return nil, false
+		return nil, false, err
 	}
-	return buf[:size], true
+	return buf[:size], f[1] == "blob", nil
 }
 
 func (b *batch) close() {

@@ -227,3 +227,44 @@ func TestSpacedNamesAndHeaderLikeLines(t *testing.T) {
 		t.Errorf("change: %+v", ch[0])
 	}
 }
+
+// FileAt reads through one git process that stays open: folders, missing files and names with spaces do not
+// upset the files read after them, new commits are seen, and it starts again after Close.
+func TestFileAtKeepsOneProcess(t *testing.T) {
+	r := newRepo(t)
+	t.Cleanup(r.Close)
+	run := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", r.Root, "-c", "user.name=T", "-c", "user.email=t@t"}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %s", args, out)
+		}
+	}
+	os.MkdirAll(filepath.Join(r.Root, "my docs"), 0o755)
+	os.WriteFile(filepath.Join(r.Root, "my docs", "read me.txt"), []byte("hello\n"), 0o644)
+	run("add", ".")
+	run("commit", "-q", "-m", "Add notes")
+	head := r.Head()
+	for i := 0; i < 3; i++ {
+		if _, ok := r.FileAt(head, "my docs"); ok {
+			t.Fatal("a folder is not a file")
+		}
+		if _, ok := r.FileAt(head, "no such file.txt"); ok {
+			t.Fatal("a missing file was read")
+		}
+		if _, ok := r.FileAt("nosuchbranch", "A.java"); ok {
+			t.Fatal("a missing revision was read")
+		}
+		if src, ok := r.FileAt(head, "my docs/read me.txt"); !ok || string(src) != "hello\n" {
+			t.Fatalf("spaced name: %q %v", src, ok)
+		}
+		if src, ok := r.FileAt(head+"~1", "A.java"); !ok || !strings.Contains(string(src), "return 2;") {
+			t.Fatalf("after the others: %q %v", src, ok)
+		}
+		if i == 1 {
+			r.Close()
+		}
+	}
+	if r.cat == nil {
+		t.Error("the process is kept between reads")
+	}
+}

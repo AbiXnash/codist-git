@@ -10,12 +10,26 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
-// Repo is one repository on disk.
+// Repo is one repository on disk. Use it through a pointer: it keeps one git process open for reading files.
 type Repo struct {
 	Root string
+
+	mu  sync.Mutex
+	cat *batch // one "git cat-file --batch" for FileAt, started on first use: a process per file is far slower
+}
+
+// Close stops the git process FileAt keeps open. The Repo can still be used; the process starts again when needed.
+func (r *Repo) Close() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.cat != nil {
+		r.cat.close()
+		r.cat = nil
+	}
 }
 
 // Commit is one commit, newest first in lists.
@@ -224,14 +238,29 @@ func (r *Repo) Changes(sha string) ([]FileChange, error) {
 
 // FileAt reads a file as it was at a commit.
 func (r *Repo) FileAt(sha, path string) ([]byte, bool) {
-	if unsafe(sha) {
+	if unsafe(sha) || strings.ContainsAny(path, "\n\x00") {
 		return nil, false
 	}
-	out, err := r.run("show", sha+":"+path)
-	if err != nil {
-		return nil, false
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for try := 0; try < 2; try++ { // once more with a new process if the old one has stopped
+		if r.cat == nil {
+			b, err := r.newBatch()
+			if err != nil {
+				logger().Warn("cat-file not started", "err", err)
+				return nil, false
+			}
+			r.cat = b
+		}
+		src, ok, err := r.cat.get(sha + ":" + path)
+		if err == nil {
+			return src, ok
+		}
+		logger().Debug("cat-file stopped; starting it again", "err", err)
+		r.cat.close()
+		r.cat = nil
 	}
-	return []byte(out), true
+	return nil, false
 }
 
 // Files lists every tracked file at a commit.
